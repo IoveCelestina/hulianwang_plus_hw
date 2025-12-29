@@ -29,6 +29,36 @@
       </div>
     </div>
 
+    <!-- AI 推荐 -->
+    <el-card class="panel" shadow="never" style="margin-bottom: 12px">
+      <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:10px;">
+        <div style="font-weight:950;">为你推荐</div>
+        <el-button class="btn" :loading="recLoading" @click="loadRecs">换一批</el-button>
+      </div>
+
+      <div v-loading="recLoading" style="display:flex;gap:10px;overflow:auto;padding-bottom:4px;">
+        <div
+          v-for="r in recs"
+          :key="r.id"
+          style="min-width:220px;border:1px solid var(--app-border);border-radius:12px;padding:10px;background:#fff;cursor:pointer;"
+          @click="goDetail(r.id)"
+        >
+          <div style="font-weight:900;">{{ r.name }}</div>
+          <div style="margin-top:6px;color:var(--app-muted);font-size:12px;min-height:16px;">
+            {{ (r.ai_highlights && r.ai_highlights[0]) || r.description || '—' }}
+          </div>
+          <div style="margin-top:8px;font-weight:950;color:var(--app-primary);">
+            ¥ {{ Number(r.price || 0).toFixed(0) }}
+          </div>
+        </div>
+
+        <div v-if="!recLoading && recs.length === 0" style="color:var(--app-muted);font-size:12px;">
+          暂无推荐
+        </div>
+      </div>
+    </el-card>
+
+    <!-- 菜品列表 -->
     <el-card class="panel" shadow="never">
       <div class="tabs-row">
         <el-segmented v-model="activeCategoryId" :options="categoryOptions" @change="load" />
@@ -58,7 +88,12 @@
             </div>
 
             <div class="highlights" v-if="d.ai_highlights?.length">
-              <el-tag v-for="(t, idx) in d.ai_highlights.slice(0, 3)" :key="idx" class="tag" effect="light">
+              <el-tag
+                v-for="(t, idx) in d.ai_highlights.slice(0, 3)"
+                :key="idx"
+                class="tag"
+                effect="light"
+              >
                 {{ t }}
               </el-tag>
             </div>
@@ -85,7 +120,7 @@
       </div>
     </el-card>
 
-    <!-- ✅ 加购 Drawer：修复点不到 footer 的问题 -->
+    <!-- 加购 Drawer -->
     <el-drawer
       v-model="addDrawerVisible"
       title="加入购物车"
@@ -96,7 +131,6 @@
       destroy-on-close
     >
       <div class="drawer-wrap">
-        <!-- ✅ 注意：loading 只包内容，不包 footer，避免遮罩层盖住按钮导致点击不触发 -->
         <div v-loading="drawerLoading" class="drawer-body">
           <div v-if="drawerDish" class="dish-mini">
             <div class="mini-left">
@@ -142,13 +176,14 @@ import { computed, onMounted, ref } from 'vue'
 import { useRouter } from 'vue-router'
 import { ElMessage } from 'element-plus'
 import { Search } from '@element-plus/icons-vue'
-
 import SpecPicker from '@/components/SpecPicker/index.vue'
 import { useCartStore } from '@/stores/cart'
+
 import {
   getCategories,
   getDishes,
   getDishDetail,
+  getHomeRecommendations, // ✅ 你要确保 api/dishes.ts 里有这个函数
   type DishListItem,
   type DishDetailOut,
   type DishSpecOut,
@@ -157,6 +192,7 @@ import {
 const router = useRouter()
 const cart = useCartStore()
 
+/** ===== 列表筛选 ===== */
 const loading = ref(false)
 const addingId = ref<number | null>(null)
 
@@ -172,11 +208,6 @@ const categoryOptions = computed(() => [
   { label: '全部', value: 'all' },
   ...categories.value.map((c) => ({ label: c.name, value: c.id })),
 ])
-
-onMounted(async () => {
-  await loadCategories()
-  await load()
-})
 
 function statusText(s: string) {
   if (s === 'on_sale') return '在售'
@@ -194,13 +225,12 @@ async function load() {
   loading.value = true
   try {
     const category_id = activeCategoryId.value === 'all' ? undefined : Number(activeCategoryId.value)
-    const res = await getDishes({
+    const res: any = await getDishes({
       category_id,
       keyword: keyword.value || undefined,
       status: status.value || undefined,
     } as any)
 
-    // 兼容两种返回结构：{items,total} 或 直接数组
     if (Array.isArray(res)) {
       dishes.value = res as any
       total.value = res.length
@@ -224,7 +254,25 @@ function goDetail(id: number) {
   router.push(`/dishes/${id}`)
 }
 
-/** ====== Drawer 加购逻辑 ====== */
+/** ===== AI 推荐 ===== */
+const recLoading = ref(false)
+const recs = ref<any[]>([])
+
+async function loadRecs() {
+  recLoading.value = true
+  try {
+    const res: any = await getHomeRecommendations()
+    recs.value = Array.isArray(res) ? res : (res?.items || [])
+    console.log('recommend/home =>', recs.value)
+  } catch (e) {
+    console.error(e)
+    ElMessage.error('获取推荐失败')
+  } finally {
+    recLoading.value = false
+  }
+}
+
+/** ===== Drawer 加购 ===== */
 const addDrawerVisible = ref(false)
 const drawerLoading = ref(false)
 const drawerSaving = ref(false)
@@ -243,9 +291,7 @@ const estAmount = computed(() => {
 async function openAddDrawer(dishId: number) {
   addingId.value = dishId
   try {
-    // 先打开抽屉（用户体验更快）
     addDrawerVisible.value = true
-
     drawerDishId.value = dishId
     quantity.value = 1
     specDraft.value = {}
@@ -256,7 +302,7 @@ async function openAddDrawer(dishId: number) {
     const detail = await getDishDetail(dishId)
     drawerDish.value = detail
     drawerSpecs.value = detail.specs || []
-  } catch (e: any) {
+  } catch (e) {
     ElMessage.error('加载菜品详情失败')
     addDrawerVisible.value = false
   } finally {
@@ -277,22 +323,13 @@ function validateRequiredSpecs(specs: DishSpecOut[], selected: Record<string, an
 }
 
 async function confirmAdd() {
-  console.log('confirmAdd clicked') // ✅ 你之前没打印，就是按钮根本点不到；这份应该会打印
+  console.log('confirmAdd clicked') // ✅ 必须能打印
 
-  if (!drawerDishId.value) {
-    ElMessage.error('dishId 缺失')
-    return
-  }
-  if (!drawerDish.value) {
-    ElMessage.error('菜品未加载完成')
-    return
-  }
+  if (!drawerDishId.value) return ElMessage.error('dishId 缺失')
+  if (!drawerDish.value) return ElMessage.error('菜品未加载完成')
 
   const ok = validateRequiredSpecs(drawerSpecs.value, specDraft.value || {})
-  if (!ok) {
-    ElMessage.warning('请先选择完整规格')
-    return
-  }
+  if (!ok) return ElMessage.warning('请先选择完整规格')
 
   drawerSaving.value = true
   try {
@@ -303,24 +340,26 @@ async function confirmAdd() {
     })
     ElMessage.success('已加入购物车')
     addDrawerVisible.value = false
-  } catch (e: any) {
+  } catch (e) {
+    console.error(e)
     ElMessage.error('加入购物车失败')
   } finally {
     drawerSaving.value = false
   }
 }
+
+/** ✅ 只保留一个 onMounted（顶层） */
+onMounted(async () => {
+  await loadCategories()
+  await load()
+  await loadRecs()
+})
 </script>
 
 <style scoped lang="scss">
 .page { padding: 18px; max-width: 1200px; margin: 0 auto; }
 
-.page-head {
-  display:flex;
-  align-items:flex-end;
-  justify-content:space-between;
-  gap:14px;
-  margin-bottom:14px;
-}
+.page-head { display:flex; align-items:flex-end; justify-content:space-between; gap:14px; margin-bottom:14px; }
 .hgroup .h1 { font-size:22px; font-weight:950; }
 .hgroup .h2 { margin-top:6px; color:var(--app-muted); font-size:13px; }
 
@@ -328,58 +367,22 @@ async function confirmAdd() {
 .search { width: 260px; }
 .status { width: 120px; }
 
-.panel {
-  border-radius: 12px;
-  border: 1px solid var(--app-border);
-  background: rgba(255,255,255,.78);
-  backdrop-filter: blur(10px);
-}
+.panel { border-radius: 12px; border: 1px solid var(--app-border); background: rgba(255,255,255,.78); backdrop-filter: blur(10px); }
 
-.tabs-row {
-  display:flex;
-  align-items:center;
-  justify-content:space-between;
-  gap:12px;
-  margin-bottom: 12px;
-}
+.tabs-row { display:flex; align-items:center; justify-content:space-between; gap:12px; margin-bottom: 12px; }
 
-.grid {
-  display:grid;
-  grid-template-columns: repeat(3, minmax(0, 1fr));
-  gap: 12px;
-}
-@media (max-width: 960px) {
-  .grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
-}
-@media (max-width: 640px) {
-  .grid { grid-template-columns: repeat(1, minmax(0, 1fr)); }
-}
+.grid { display:grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 12px; }
+@media (max-width: 960px) { .grid { grid-template-columns: repeat(2, minmax(0, 1fr)); } }
+@media (max-width: 640px) { .grid { grid-template-columns: repeat(1, minmax(0, 1fr)); } }
 
-.card {
-  border: 1px solid var(--app-border);
-  background: #fff;
-  border-radius: 12px;
-  overflow:hidden;
-  cursor: pointer;
-  transition: transform .12s ease;
-}
+.card { border: 1px solid var(--app-border); background: #fff; border-radius: 12px; overflow:hidden; cursor: pointer; transition: transform .12s ease; }
 .card:hover { transform: translateY(-1px); }
 
 .thumb { position: relative; height: 150px; background: #f3f4f6; }
 .thumb img { width:100%; height:100%; object-fit:cover; display:block; }
 .ph { height:100%; display:flex; align-items:center; justify-content:center; color:#9ca3af; font-weight:800; }
 
-.status-pill {
-  position:absolute;
-  left:10px;
-  top:10px;
-  padding: 4px 10px;
-  border-radius: 999px;
-  font-size: 12px;
-  font-weight: 900;
-  color: #fff;
-  background: #10b981;
-}
+.status-pill { position:absolute; left:10px; top:10px; padding: 4px 10px; border-radius: 999px; font-size: 12px; font-weight: 900; color: #fff; background: #10b981; }
 .status-pill[data-status="sold_out"] { background: #f59e0b; }
 .status-pill[data-status="offline"] { background: #6b7280; }
 
@@ -397,12 +400,7 @@ async function confirmAdd() {
 .actions { margin-top: 12px; display:flex; gap:10px; justify-content:flex-end; }
 
 .btn { border-radius: 10px; border: 1px solid var(--app-border); }
-.btn-primary {
-  border-radius: 10px;
-  border: 1px solid rgba(99, 102, 241, 0.25);
-  background: linear-gradient(135deg, rgba(99,102,241,.95), rgba(109,40,217,.95));
-  color: #fff;
-}
+.btn-primary { border-radius: 10px; border: 1px solid rgba(99, 102, 241, 0.25); background: linear-gradient(135deg, rgba(99,102,241,.95), rgba(109,40,217,.95)); color: #fff; }
 
 .empty { padding: 46px 0; text-align:center; grid-column: 1 / -1; }
 .empty-title { font-size: 16px; font-weight: 950; }
@@ -410,14 +408,7 @@ async function confirmAdd() {
 
 .drawer-wrap { display:flex; flex-direction:column; height: 100%; }
 .drawer-body { flex: 1; padding-bottom: 12px; }
-.drawer-footer {
-  padding: 12px 0;
-  display:flex;
-  justify-content:flex-end;
-  gap:12px;
-  border-top: 1px solid var(--app-border);
-  background: #fff;
-}
+.drawer-footer { padding: 12px 0; display:flex; justify-content:flex-end; gap:12px; border-top: 1px solid var(--app-border); background: #fff; }
 
 .section-title { margin: 12px 0 8px; font-weight: 950; }
 .qty { margin-top: 12px; display:flex; align-items:center; justify-content:space-between; gap:12px; }

@@ -67,6 +67,7 @@
       </el-card>
     </div>
   </div>
+  <ReviewsPanel v-if="dish" :dishId="dish.id" style="margin-top:14px;" />
 </template>
 
 <script setup lang="ts">
@@ -76,6 +77,7 @@ import { ElMessage } from 'element-plus'
 import { getDishDetail, type DishDetailOut, type DishSpecOut } from '@/api/dishes'
 import { useCartStore } from '@/stores/cart'
 import SpecPicker from '@/components/SpecPicker/index.vue'
+import ReviewsPanel from '@/components/ReviewsPanel.vue'
 
 const route = useRoute()
 const router = useRouter()

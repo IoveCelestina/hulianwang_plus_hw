@@ -42,5 +42,7 @@ export const getDishes = (params?: { category_id?: number; keyword?: string; sta
   request.get('/dishes', { params }) as Promise<DishListOut>
 export const getDishDetail = (id: number) =>
   request.get(`/dishes/${id}`) as Promise<DishDetailOut>
-export const getHomeRecommend = () =>
-  request.get('/dishes/recommend/home') as Promise<DishListOut>
+export async function getHomeRecommendations() {
+  const res: any = await request.get('/dishes/recommend/home')
+  return Array.isArray(res) ? res : (res?.items || res?.data || [])
+}

@@ -1,207 +1,235 @@
 <template>
   <div class="page">
-    <div class="page-head">
-      <div class="hgroup">
-        <div class="h1">AI 推荐</div>
-        <div class="h2">描述你的口味，AI 会给你推荐菜品</div>
+    <div class="left">
+      <div class="head">
+        <div class="title">AI 点单</div>
+        <el-button class="btn" @click="newSession" :loading="creating">新会话</el-button>
       </div>
-      <el-button class="btn" :loading="booting" @click="resetSession">重置会话</el-button>
+
+      <div v-loading="sessionsLoading" class="sessions">
+        <div
+          v-for="s in sessions"
+          :key="s.id"
+          class="sitem"
+          :data-active="s.id===activeSessionId"
+          @click="openSession(s.id)"
+        >
+          <div class="st">{{ s.title || ('会话 #' + s.id) }}</div>
+          <div class="sd" v-if="s.created_at">{{ s.created_at }}</div>
+        </div>
+      </div>
     </div>
 
-    <el-card class="panel" shadow="never">
-      <div class="chat">
-        <div class="msgs" ref="scrollRef">
-          <div v-for="(m, idx) in messages" :key="idx" class="msg" :data-role="m.role">
-            <div class="bubble">
-              <div class="content">{{ m.content }}</div>
-              <div v-if="m.recommendations?.length" class="recs">
-                <div class="rec" v-for="r in m.recommendations" :key="r.dish_id">
-                  <div class="r1">
-                    <b>{{ r.dish_name || ('Dish #' + r.dish_id) }}</b>
-                    <span class="score" v-if="r.fit_score != null">fit {{ r.fit_score }}</span>
-                  </div>
-                  <div class="r2" v-if="r.reason">{{ r.reason }}</div>
-                  <div class="r3">
-                    <el-button class="btn" size="small" @click="goDish(r.dish_id)">查看</el-button>
-                    <el-button class="btn-primary" size="small" @click="addDish(r.dish_id)">加购</el-button>
-                  </div>
-                </div>
-              </div>
-            </div>
-          </div>
+    <div class="right">
+      <div class="rhead">
+        <div class="rt">{{ activeTitle }}</div>
+        <el-button class="btn" @click="reloadMessages" :disabled="!activeSessionId">刷新</el-button>
+      </div>
 
-          <div v-if="streaming" class="msg" data-role="assistant">
-            <div class="bubble">
-              <div class="content muted">AI 正在思考…</div>
-            </div>
-          </div>
+      <div class="msgs" v-loading="msgsLoading" ref="msgBox">
+        <div v-if="messages.length===0 && !msgsLoading" class="empty">
+          还没有消息，试试问：“推荐两道清淡不辣的菜，并加入购物车”
         </div>
 
-        <div class="composer">
-          <el-input
-            v-model="input"
-            type="textarea"
-            :rows="2"
-            placeholder="例如：我想吃清淡一点的，不要香菜，偏高蛋白…"
-            @keydown.enter.exact.prevent="send"
-          />
-          <el-button class="btn-primary" :loading="streaming" @click="send">发送</el-button>
+        <div v-for="m in messages" :key="m.id" class="msg" :data-role="m.role">
+          <div class="bubble">{{ m.content }}</div>
         </div>
       </div>
-    </el-card>
+
+      <div class="composer">
+        <el-input
+          v-model="input"
+          type="textarea"
+          :rows="2"
+          placeholder="输入你的需求，例如：推荐两道不辣的主食，加入购物车"
+          @keydown.enter.exact.prevent="send"
+        />
+        <el-button class="btn-primary" :loading="sending" :disabled="!activeSessionId" @click="send">
+          发送
+        </el-button>
+      </div>
+    </div>
   </div>
 </template>
 
 <script setup lang="ts">
-import { nextTick, onMounted, ref } from 'vue'
+import { computed, nextTick, onMounted, ref } from 'vue'
 import { ElMessage } from 'element-plus'
-import { createSession, streamMessageUrl } from '@/api/ai'
-import { postSse } from '@/utils/sse'
-import { useCartStore } from '@/stores/cart'
-import { useRouter } from 'vue-router'
+import { createAiSession, getAiMessages, listAiSessions, postAiMessage, type AiMessageOut, type AiSessionOut } from '@/api/ai'
 
-type ChatMsg = {
-  role: 'user' | 'assistant'
-  content: string
-  recommendations?: any[]
-}
-
-const router = useRouter()
-const cart = useCartStore()
-
-const booting = ref(false)
-const sessionId = ref<number | null>(null)
-
-const messages = ref<ChatMsg[]>([
-  { role: 'assistant', content: '你好～告诉我你想吃什么口味，我来帮你推荐。' },
-])
+const sessionsLoading = ref(false)
+const sessions = ref<AiSessionOut[]>([])
+const activeSessionId = ref<number | null>(null)
+const messages = ref<AiMessageOut[]>([])
+const msgsLoading = ref(false)
 
 const input = ref('')
-const streaming = ref(false)
-const controller = ref<AbortController | null>(null)
+const sending = ref(false)
+const creating = ref(false)
 
-const scrollRef = ref<HTMLElement | null>(null)
-async function scrollToBottom() {
-  await nextTick()
-  const el = scrollRef.value
+const msgBox = ref<HTMLDivElement | null>(null)
+
+const activeTitle = computed(() => {
+  const s = sessions.value.find(x => x.id === activeSessionId.value)
+  return s?.title || (activeSessionId.value ? `会话 #${activeSessionId.value}` : '未选择会话')
+})
+
+async function loadSessions() {
+  sessionsLoading.value = true
+  try {
+    sessions.value = await listAiSessions()
+    if (!activeSessionId.value && sessions.value.length) {
+      await openSession(sessions.value[0].id)
+    }
+  } finally {
+    sessionsLoading.value = false
+  }
+}
+
+async function openSession(id: number) {
+  activeSessionId.value = id
+  await reloadMessages()
+}
+
+async function reloadMessages() {
+  if (!activeSessionId.value) return
+  msgsLoading.value = true
+  try {
+    messages.value = await getAiMessages(activeSessionId.value)
+    await nextTick()
+    scrollBottom()
+  } finally {
+    msgsLoading.value = false
+  }
+}
+
+function scrollBottom() {
+  const el = msgBox.value
   if (!el) return
   el.scrollTop = el.scrollHeight
 }
 
-onMounted(async () => {
-  await resetSession()
-})
-
-async function resetSession() {
-  controller.value?.abort()
-  controller.value = null
-  booting.value = true
+async function newSession() {
+  creating.value = true
   try {
-    const res = await createSession()
-    sessionId.value = res.session_id
-    messages.value = [{ role: 'assistant', content: '会话已创建～说说你今天想吃什么？' }]
+    const s = await createAiSession({ title: '新的点单会话' })
+    await loadSessions()
+    await openSession(s.id)
+  } catch (e: any) {
+    ElMessage.error('创建会话失败（请确认已登录）')
   } finally {
-    booting.value = false
-    await scrollToBottom()
+    creating.value = false
   }
 }
 
 async function send() {
-  if (!sessionId.value) return
-  const text = input.value.trim()
-  if (!text) return
+  if (!activeSessionId.value) {
+    ElMessage.warning('请先选择/创建会话')
+    return
+  }
+  const content = input.value.trim()
+  if (!content) return
 
-  messages.value.push({ role: 'user', content: text })
-  input.value = ''
-  await scrollToBottom()
-
-  streaming.value = true
-  controller.value = new AbortController()
-
-  // 聚合一条 assistant 消息
-  const assistant: ChatMsg = { role: 'assistant', content: '' }
-  messages.value.push(assistant)
-  await scrollToBottom()
-
+  sending.value = true
   try {
-    await postSse(
-      streamMessageUrl(sessionId.value),
-      { content: text },
-      (json) => {
-        // 兼容：token / delta / text / recommendations / done
-        if (json.token) assistant.content += String(json.token)
-        if (json.delta) assistant.content += String(json.delta)
-        if (json.text) assistant.content += String(json.text)
-        if (json.recommendations) assistant.recommendations = json.recommendations
-        if (json.done) {
-          // noop
-        }
-        scrollToBottom()
-      },
-      controller.value.signal
-    )
+    input.value = ''
+    // 先把用户消息塞进去，体验更好
+    messages.value = [
+      ...messages.value,
+      { id: Date.now(), role: 'user', content } as any,
+    ]
+    await nextTick()
+    scrollBottom()
+
+    const res = await postAiMessage(activeSessionId.value, { content })
+    // 兼容：后端可能返回一条 assistant，也可能返回全量 messages
+    if (Array.isArray(res)) {
+      messages.value = res
+    } else if (res?.role) {
+      messages.value = [...messages.value, res]
+    } else {
+      // 如果返回结构不确定，就再拉一次
+      await reloadMessages()
+    }
+    await nextTick()
+    scrollBottom()
   } catch (e: any) {
-    ElMessage.error(e?.message || 'AI 请求失败')
+    ElMessage.error('发送失败（请确认已登录）')
   } finally {
-    streaming.value = false
-    controller.value = null
-    await scrollToBottom()
+    sending.value = false
   }
 }
 
-function goDish(id: number) {
-  router.push(`/dishes/${id}`)
-}
-async function addDish(id: number) {
-  try {
-    await cart.add(id, 1, {})
-    ElMessage.success('已加入购物车')
-  } catch {}
-}
+onMounted(loadSessions)
 </script>
 
 <style scoped lang="scss">
-.page { padding: 18px; max-width: 1100px; margin: 0 auto; }
-.page-head { display:flex; align-items:flex-end; justify-content:space-between; gap:14px; margin-bottom: 14px; }
-.hgroup .h1 { font-size: 22px; font-weight: 950; }
-.hgroup .h2 { margin-top: 6px; color: var(--app-muted); font-size: 13px; }
-.panel { border-radius: 12px; border: 1px solid var(--app-border); background: rgba(255,255,255,.78); backdrop-filter: blur(10px); }
+.page { display:flex; gap:12px; padding: 14px; height: calc(100vh - 60px); }
 
-.chat { display:flex; flex-direction:column; gap: 12px; }
-.msgs {
-  height: 560px;
-  overflow: auto;
+.left {
+  width: 280px;
+  border: 1px solid var(--app-border);
+  border-radius: 12px;
+  background: rgba(255,255,255,.78);
+  backdrop-filter: blur(10px);
+  display:flex;
+  flex-direction:column;
+  overflow:hidden;
+}
+.head { padding: 12px; display:flex; justify-content:space-between; align-items:center; border-bottom:1px solid var(--app-border); }
+.title { font-weight: 950; }
+.sessions { padding: 8px; overflow:auto; flex:1; }
+.sitem { padding: 10px; border-radius: 10px; border:1px solid transparent; cursor:pointer; }
+.sitem[data-active="true"] { border-color: rgba(99,102,241,.25); background: rgba(99,102,241,.08); }
+.st { font-weight: 900; }
+.sd { margin-top: 4px; font-size:12px; color: var(--app-muted); }
+
+.right {
+  flex:1;
+  border: 1px solid var(--app-border);
+  border-radius: 12px;
+  background: rgba(255,255,255,.78);
+  backdrop-filter: blur(10px);
+  display:flex;
+  flex-direction:column;
+  overflow:hidden;
+}
+.rhead { padding: 12px; display:flex; justify-content:space-between; align-items:center; border-bottom:1px solid var(--app-border); }
+.rt { font-weight: 950; }
+
+.msgs { flex:1; overflow:auto; padding: 12px; display:flex; flex-direction:column; gap:10px; }
+.empty { color: var(--app-muted); text-align:center; padding: 24px 0; }
+
+.msg { display:flex; }
+.msg[data-role="user"] { justify-content:flex-end; }
+.msg[data-role="assistant"] { justify-content:flex-start; }
+
+.bubble {
+  max-width: 72%;
+  padding: 10px 12px;
   border-radius: 12px;
   border: 1px solid var(--app-border);
   background: #fff;
+  white-space: pre-wrap;
+  line-height: 1.5;
+}
+.msg[data-role="user"] .bubble {
+  background: rgba(99,102,241,.10);
+  border-color: rgba(99,102,241,.25);
+}
+
+.composer {
   padding: 12px;
+  border-top:1px solid var(--app-border);
+  display:flex;
+  gap:10px;
+  align-items:flex-end;
 }
-.msg { display:flex; margin-bottom: 10px; }
-.msg[data-role='user'] { justify-content: flex-end; }
-.bubble {
-  max-width: 78%;
-  border-radius: 14px;
-  padding: 10px 12px;
-  border: 1px solid var(--app-border);
-  background: rgba(15,23,42,.04);
-}
-.msg[data-role='assistant'] .bubble {
-  background: #fff;
-}
-.content { white-space: pre-wrap; }
-.muted { color: var(--app-muted); font-size: 12px; }
-
-.recs { margin-top: 10px; display:flex; flex-direction:column; gap: 8px; }
-.rec { border: 1px solid var(--app-border); border-radius: 12px; padding: 10px; background: rgba(79,70,229,.06); }
-.r1 { display:flex; justify-content:space-between; gap: 10px; align-items:center; }
-.score { font-size: 12px; font-weight: 900; color: var(--app-primary); }
-.r2 { margin-top: 6px; color:#334155; font-size: 12px; }
-.r3 { margin-top: 10px; display:flex; justify-content:flex-end; gap: 8px; }
-
-.composer { display:flex; gap: 10px; align-items:flex-end; }
-.btn { border-radius: 10px; border: 1px solid var(--app-border); font-weight: 900; }
+.btn { border-radius:10px; border:1px solid var(--app-border); }
 .btn-primary {
-  border-radius: 10px; border: 1px solid rgba(99,102,241,.25);
-  background: linear-gradient(135deg, rgba(99,102,241,.95), rgba(109,40,217,.95)); color:#fff; font-weight: 900;
+  border-radius: 10px;
+  border: 1px solid rgba(99, 102, 241, 0.25);
+  background: linear-gradient(135deg, rgba(99,102,241,.95), rgba(109,40,217,.95));
+  color: #fff;
 }
 </style>
